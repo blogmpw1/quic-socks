@@ -24,7 +24,7 @@ namespace socks::tunnel {
 class Session {
  public:
   Session(asio::io_context &ctx, asio::ip::tcp::socket socket)
-      : ctx_{ctx}, socket_{std::move(socket)}, remote_{ctx}, local_buf_{} {}
+      : ctx_{ctx}, socket_{std::move(socket)}, remote_{ctx} {}
 
   void Start() noexcept {
     co_spawn(
@@ -39,8 +39,8 @@ class Session {
       co_await ConnectRemote(uri);
 
       if (entity.method == "CONNECT") {
-        std::string response =
-            fmt::format("HTTP/1.1 200 Connection Established\r\n\r\n");
+        const std::string response = {
+            "HTTP/1.1 200 Connection Established\r\n\r\n"};
         co_await socket_.async_write_some(asio::buffer(response),
                                           asio::use_awaitable);
       } else {
@@ -143,9 +143,6 @@ class Session {
   asio::io_context &ctx_;
   asio::ip::tcp::socket socket_;
   asio::ip::tcp::socket remote_;
-
-  constexpr static size_t kMaxBufLen = 1024;
-  std::array<uint8_t, kMaxBufLen> local_buf_;
 };
 
 class HttpProxyImpl final : public HttpProxy {
