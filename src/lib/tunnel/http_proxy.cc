@@ -4,63 +4,22 @@
 
 #include "tunnel/http_proxy.h"
 
+#include <fmt/ostream.h>
+#define SPDLOG_ACTIVE_LEVEL 0
 #include <spdlog/spdlog.h>
 
 #include <asio.hpp>
 #include <asio/awaitable.hpp>
-#include <map>
+#include <asio/experimental/as_tuple.hpp>
 #include <memory>
-#include <ranges>
 #include <regex>
 #include <variant>
 
-// ReSharper disable once CppUnusedIncludeDirective
-#include "tunnel/asio_formatter.h"
+#include "entities.h"
+#include "tunnel/asio_coro.h"
 #include "utility/result.h"
 
 namespace socks::tunnel {
-
-struct Uri {
-  uint16_t port{};
-  std::string scheme;
-  std::string host;
-  std::string path;
-
-  static Uri Parse(std::string_view s) {
-    const std::regex pattern{"^((\\w+)://)?([^/:]+)(:(\\d+))?(.*)?$"};
-    std::match_results<std::string_view::const_iterator> match;
-    if (!std::regex_match(s.begin(), s.end(), match, pattern)) {
-      throw SocksException(
-          fmt::format("[tunnel] parse resource failed, s={}", s));
-    }
-
-    Uri uri;
-    uri.scheme = match.str(2);
-    uri.host = match.str(3);
-    const auto port_str = match.str(5);
-    if (port_str.empty()) {
-      if (uri.scheme == "http") {
-        uri.port = 80;
-      } else if (uri.scheme == "https") {
-        uri.port = 443;
-      }
-    } else {
-      uri.port =
-          static_cast<uint16_t>(std::strtol(port_str.c_str(), nullptr, 10));
-    }
-    uri.path = match.str(6);
-    return uri;
-  }
-};
-
-struct RequestEntity {
-  std::string method;
-  std::string host;
-  std::string ver;
-  std::multimap<std::string, std::string> headers;
-
-  RequestEntity() = default;
-};
 
 class Session {
  public:
@@ -73,25 +32,52 @@ class Session {
   }
 
   asio::awaitable<void> AsyncStart() noexcept {
+    RequestEntity entity;
     try {
-      const auto entity = co_await ParseRequest();
-      const auto uri = Uri::Parse(entity.host);
+      entity = co_await ParseRequest();
+      const auto uri = Uri::Parse(entity.uri);
       co_await ConnectRemote(uri);
-    } catch (std::runtime_error &e) {
-      Close();
-    }
 
-    try {
-      while (true) {
-        co_await LoopOnce();
+      if (entity.method == "CONNECT") {
+        std::string response =
+            fmt::format("HTTP/1.1 200 Connection Established\r\n\r\n");
+        co_await socket_.async_write_some(asio::buffer(response),
+                                          asio::use_awaitable);
+      } else {
+        const std::string request = entity.Dump();
+        co_await remote_.async_write_some(asio::buffer(request),
+                                          asio::use_awaitable);
       }
-    } catch (asio::system_error &e) {
-      spdlog::info("[tunnel] session stops, e={}", e.what());
+
+      co_await WaitAll(ctx_, std::chrono::hours{24},
+                       ForwardTo(&socket_, &remote_),
+                       ForwardTo(&remote_, &socket_));
+    } catch (std::runtime_error &e) {
+      SPDLOG_ERROR("[tunnel] close socket, uri={}, e={}", entity.uri, e.what());
+    }
+    Close();
+  }
+
+  static asio::awaitable<asio::system_error> ForwardTo(
+      asio::ip::tcp::socket *from, asio::ip::tcp::socket *to) {
+    std::array<char, 8196> buf{};
+    while (true) {
+      try {
+        const auto len = co_await from->async_read_some(asio::buffer(buf),
+                                                        asio::use_awaitable);
+        SPDLOG_DEBUG("[tunnel] {} >-- {}, len={}", from->remote_endpoint(),
+                     to->remote_endpoint(), len);
+        co_await to->async_write_some(asio::buffer(buf, len),
+                                      asio::use_awaitable);
+        SPDLOG_DEBUG("[tunnel] {} --> {}, len={}", from->remote_endpoint(),
+                     to->remote_endpoint(), len);
+      } catch (asio::system_error &e) {
+        co_return e;
+      }
     }
   }
 
-  asio::awaitable<void> ConnectRemote(
-      const Uri &uri) {
+  asio::awaitable<void> ConnectRemote(const Uri &uri) {
     asio::error_code err;
     auto address = asio::ip::make_address(uri.host, err);
     if (err) {
@@ -99,8 +85,8 @@ class Session {
       const auto resolve_res = co_await resolver.async_resolve(
           uri.host, std::to_string(uri.port), asio::use_awaitable);
       if (resolve_res.empty()) {
-        spdlog::error("[tunnel] resolve dns failed, host={}", uri.host);
-        throw SocksException()
+        throw SocksException(
+            fmt::format("[tunnel] resolve dns failed, host={}", uri.host));
       }
 
       address = resolve_res->endpoint().address();
@@ -108,6 +94,7 @@ class Session {
 
     const auto ep = asio::ip::tcp::endpoint{address, uri.port};
     co_await remote_.async_connect(ep, asio::use_awaitable);
+    SPDLOG_INFO("[tunnel] remote connected, uri={}, ep={}", uri, ep);
   }
 
   asio::awaitable<RequestEntity> ParseRequest() {
@@ -116,7 +103,7 @@ class Session {
     RequestEntity entity;
     // Request line
     co_await async_read_until(socket_, buf, "\r\n", asio::use_awaitable);
-    stream >> entity.method >> entity.host >> entity.ver;
+    stream >> entity.method >> entity.uri >> entity.ver;
     // Headers
     while (true) {
       co_await async_read_until(socket_, buf, "\r\n", asio::use_awaitable);
@@ -126,34 +113,29 @@ class Session {
       if (header_line.size() <= 2) break;
 
       // Trim "\r\n"
-      std::string_view trimmed{header_line.begin(), header_line.end() - 2};
+      std::string_view trimmed{header_line.c_str(), header_line.size() - 2};
       const auto delimiter = ": ";
       const auto pos = trimmed.find_first_of(delimiter);
       if (pos == std::string::npos) {
-        spdlog::error("[tunnel] parse request header failed, line={}", trimmed);
-        throw SocksException{"parse request header failed"};
+        throw SocksException{fmt::format(
+            "[tunnel] parse request header failed, line={}", trimmed)};
       }
 
       std::string key{trimmed.substr({}, pos)}, value{trimmed.substr(pos + 2)};
       entity.headers.emplace(std::move(key), std::move(value));
     }
+    SPDLOG_INFO("[tunnel] request parsed, entity={}", entity);
     co_return entity;
-  }
-
-  asio::awaitable<void> LoopOnce() {
-    auto len = co_await socket_.async_read_some(asio::buffer(local_buf_),
-
-                                                asio::use_awaitable);
-    spdlog::debug("[tunnel] >-- len={}", len);
-    co_await socket_.async_write_some(asio::buffer(local_buf_, len),
-                                      asio::use_awaitable);
-    spdlog::debug("[tunnel] --> len={}", len);
   }
 
   void Close() {
     if (socket_.is_open()) {
-      spdlog::info("[tunnel] socket closed, ep=", socket_.local_endpoint());
+      SPDLOG_INFO("[tunnel] close socket, remote={}",
+                  socket_.remote_endpoint());
       socket_.close();
+    }
+    if (remote_.is_open()) {
+      remote_.close();
     }
   }
 
@@ -169,7 +151,8 @@ class Session {
 class HttpProxyImpl final : public HttpProxy {
  public:
   explicit HttpProxyImpl(const uint16_t port)
-      : acceptor_{ctx_, asio::ip::tcp::endpoint{asio::ip::tcp::v4(), port}} {}
+      : ctx_{ASIO_CONCURRENCY_HINT_UNSAFE_IO},
+        acceptor_{ctx_, asio::ip::tcp::endpoint{asio::ip::tcp::v4(), port}} {}
   ~HttpProxyImpl() override {
     if (thread_ != nullptr) {
       ctx_.stop();
@@ -195,7 +178,7 @@ class HttpProxyImpl final : public HttpProxy {
         session->Start();
         sessions_.push_back(std::move(session));
       } catch (const asio::system_error &e) {
-        spdlog::error("accept exception, e={}", e.what());
+        SPDLOG_ERROR("accept exception, e={}", e.what());
         break;
       }
     }
