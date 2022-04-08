@@ -46,7 +46,9 @@ std::ostream &operator<<(std::ostream &os, const RequestEntity &req) {
 }
 std::string RequestEntity::Dump() const {
   fmt::memory_buffer buf;
-  fmt::format_to(std::back_inserter(buf), "{} {} {}\r\n", method, uri, ver);
+  const auto uri_obj = Uri::Parse(uri);
+  fmt::format_to(std::back_inserter(buf), "{} {} {}\r\n", method, uri_obj.path,
+                 ver);
   for (const auto &[k, v] : headers) {
     fmt::format_to(std::back_inserter(buf), "{}: {}\r\n", k, v);
   }

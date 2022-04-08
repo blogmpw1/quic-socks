@@ -55,8 +55,8 @@ class Session {
     } catch (std::runtime_error &e) {
       SPDLOG_ERROR("[tunnel] close socket, uri={}, e={}, idx={}", entity.uri,
                    e.what(), idx_);
+      Close();
     }
-    Close();
   }
 
   asio::awaitable<asio::system_error> ForwardTo(asio::streambuf *buf,
@@ -72,6 +72,7 @@ class Session {
         SPDLOG_DEBUG("[tunnel] {} --> {}, len={}, idx={}",
                      from->remote_endpoint(), to->remote_endpoint(), len, idx_);
       } catch (asio::system_error &e) {
+        Close();
         co_return e;
       }
     }
@@ -82,7 +83,7 @@ class Session {
     auto address = asio::ip::make_address(uri.host, err);
     if (err) {
       asio::ip::tcp::resolver resolver{ctx_};
-      const auto resolve_res = co_await resolver.async_resolve(
+      auto &&resolve_res = co_await resolver.async_resolve(
           uri.host, std::to_string(uri.port), asio::use_awaitable);
       if (resolve_res.empty()) {
         throw SocksException(
@@ -107,14 +108,15 @@ class Session {
                    len, idx_);
       if (len == 0) continue;
 
-      std::string kRequestEnd = "\r\n\r\n";
+      const std::string kRequestEnd = "\r\n\r\n";
       const auto const_buf = buf->data();
       const auto buf_begin = static_cast<const char *>(const_buf.data());
       const auto buf_end =
           static_cast<const char *>(const_buf.data()) + const_buf.size();
-      const auto pos = std::search(buf_begin, buf_end, std::begin(kRequestEnd),
-                                   std::end(kRequestEnd));
-      if (pos != buf_end) {
+      if (const auto pos =
+              std::search(buf_begin, buf_end, std::begin(kRequestEnd),
+                          std::end(kRequestEnd));
+          pos != buf_end) {
         const auto raw_len =
             static_cast<size_t>(pos - buf_begin) + kRequestEnd.size();
         buf->consume(raw_len);
@@ -174,15 +176,19 @@ class HttpProxyImpl final : public HttpProxy {
  private:
   asio::awaitable<void> Accept() {
     size_t idx{0};
+    std::atomic_size_t cnt{0};
     while (true) {
       try {
-        auto socket = co_await acceptor_.async_accept(asio::use_awaitable);
+        auto &&socket = co_await acceptor_.async_accept(asio::use_awaitable);
         auto session =
             std::make_shared<Session>(idx++, ctx_, std::move(socket));
-        asio::co_spawn(
+        co_spawn(
             ctx_,
-            [session]() -> asio::awaitable<void> {
+            [session, &cnt]() -> asio::awaitable<void> {
+              ++cnt;
               co_await session->AsyncStart();
+              --cnt;
+              SPDLOG_INFO("[tunnel] session closed, cnt={}", cnt);
             },
             asio::detached);
       } catch (const asio::system_error &e) {
