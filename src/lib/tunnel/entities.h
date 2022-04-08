@@ -8,6 +8,8 @@
 #include <string>
 #include <string_view>
 
+#include "utility/result.h"
+
 namespace socks::tunnel {
 
 struct Uri {
@@ -26,6 +28,8 @@ struct RequestEntity {
   std::string uri;
   std::string ver;
   std::multimap<std::string, std::string> headers;
+
+  static Result<RequestEntity, SocksException> Parse(std::string_view s);
 
   friend std::ostream &operator<<(std::ostream &os, const RequestEntity &req);
   RequestEntity() = default;

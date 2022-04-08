@@ -46,12 +46,59 @@ std::ostream &operator<<(std::ostream &os, const RequestEntity &req) {
 }
 std::string RequestEntity::Dump() const {
   fmt::memory_buffer buf;
-  const auto path = Uri::Parse(uri).path;
-  fmt::format_to(std::back_inserter(buf), "{} {} {}\r\n", method, path, ver);
+  fmt::format_to(std::back_inserter(buf), "{} {} {}\r\n", method, uri, ver);
   for (const auto &[k, v] : headers) {
     fmt::format_to(std::back_inserter(buf), "{}: {}\r\n", k, v);
   }
   fmt::format_to(std::back_inserter(buf), "\r\n");
   return fmt::to_string(buf);
+}
+Result<RequestEntity, SocksException> RequestEntity::Parse(std::string_view s) {
+  RequestEntity entity;
+
+  // start line
+  {
+    const auto line_end = s.find("\r\n");
+    if (line_end == std::string_view::npos) {
+      return SocksException(
+          fmt::format("[tunnel] parse request failed, no start line, s={}", s));
+    }
+
+    const std::regex re{R"(^([A-Z]+) ([^ ]+) (HTTP/\d\.\d)$)"};
+    std::match_results<std::string_view::const_iterator> match;
+    if (!std::regex_match(s.begin(), s.begin() + line_end, match, re)) {
+      return SocksException(
+          fmt::format("[tunnel] parse request failed, no start line, s={}", s));
+    }
+
+    entity.method = match.str(1);
+    entity.uri = match.str(2);
+    entity.ver = match.str(3);
+
+    s = s.substr(line_end + 2);
+  }
+  // headers
+  while (true) {
+    const auto line_end = s.find("\r\n");
+    if (line_end == std::string_view::npos) {
+      return SocksException(
+          fmt::format("[tunnel] parse request failed, no header, s={}", s));
+    }
+
+    const auto line = s.substr(0, line_end);
+    if (line.empty()) break;
+
+    const std::regex re{"^([^:]+): (.*)$"};
+    std::match_results<std::string_view::const_iterator> match;
+    if (!std::regex_match(line.begin(), line.end(), match, re)) {
+      return SocksException(fmt::format(
+          "[tunnel] parse request failed, invalid header, s={}", s));
+    }
+
+    entity.headers.emplace(match.str(1), match.str(2));
+    s = s.substr(line_end + 2);
+  }
+
+  return entity;
 }
 }  // namespace socks::tunnel
