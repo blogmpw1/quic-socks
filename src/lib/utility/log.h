@@ -8,4 +8,12 @@
 #define SPDLOG_ACTIVE_LEVEL 0
 #include <spdlog/spdlog.h>
 
+#include <iostream>
+
+namespace socks {
+
+void InitAsyncLogger();
+
+}  // namespace socks
+
 #endif  // QUIC_SOCKS_UTILITY_LOG_H_

@@ -2,6 +2,7 @@
 
 #include <memory>
 
+#include "observer/network_observer.h"
 #include "utility/ctor.h"
 
 namespace socks::tunnel {
@@ -12,6 +13,7 @@ class HttpProxy : Movable, NonCopyable {
 
   virtual ~HttpProxy() = default;
   virtual void Start() = 0;
+  virtual void Register(NetworkObserver *observer) = 0;
 };
 
 }  // namespace socks::tunnel
