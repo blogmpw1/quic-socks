@@ -1,25 +1,48 @@
-name: C/C++ CI
-
-on:
-  push:
-
+name: C-- CI
+on: [push, pull_request]
+env:
+    BUILD_TYPE: Release
 
 jobs:
-  build:
+    build:
+        name: ${{ matrix.os }}
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest, macos-latest, windows-latest]
 
-    runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v2
+            - name: Create Build Environment
+              run: cmake -E make_directory ${{runner.workspace}}/build
 
-    steps:
-    - uses: actions/checkout@v3
-    - name: configure
-      run: ./configure
-    - name: make
-      run: make
-    - name: make check
-      run: make check
-    - name: make distcheck
-      run: make distcheck
+            - name: Configure CMake (Windows)
+              if: matrix.os == 'windows-latest'
+              working-directory: ${{runner.workspace}}/build
+              run: cmake $env:GITHUB_WORKSPACE -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE
 
+            - name: Configure CMake (UNIX)
+              if: matrix.os != 'windows-latest'
+              working-directory: ${{runner.workspace}}/build
+              run: cmake $GITHUB_WORKSPACE -DCMAKE_BUILD_TYPE=$BUILD_TYPE
 
-    - name: Upload a Build Artifact
-      uses: actions/upload-artifact@v3.1.0
+            - name: Build (Windows)
+              if: matrix.os == 'windows-latest'
+              working-directory: ${{runner.workspace}}/build
+              run: cmake --build . --config $env:BUILD_TYPE
+
+            - name: Build (UNIX)
+              if: matrix.os != 'windows-latest'
+              working-directory: ${{runner.workspace}}/build
+              run: cmake --build . --config $BUILD_TYPE
+
+            - name: Test (UNIX)
+              if: matrix.os != 'windows-latest'
+              working-directory: ${{runner.workspace}}/build
+              run: ./c-- /?
+
+            - name: Test (Windows)
+              if: matrix.os == 'windows-latest'
+              working-directory: ${{runner.workspace}}/build
+              run: .\Release\c--.exe /?
